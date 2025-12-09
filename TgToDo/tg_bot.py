@@ -1,7 +1,8 @@
 
 import logging
-
 import os
+
+from clickhouse_driver import Client
 import pandas as pd
 from aiogram import Bot, Dispatcher, executor, types
 
@@ -11,35 +12,40 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
-# ============ !!! Секретный токен :) !!! ===============
+# ============ !!!!! ===============
 APP_TOKEN = os.environ.get("APP_TOKEN")
-# ====================================================
-PATH_TO_TODO_TABLE = "todo_result/todo_list.csv"
+# ==================================
 
 bot = Bot(token=APP_TOKEN)
 dp = Dispatcher(bot)
 
-
-def get_todo_data():
-    # ============== Берем ==============
-    return pd.read_csv(PATH_TO_TODO_TABLE)
-    # ===================================
+connection = Client(
+    host="localhost",  # <-- Проблема вот тут
+    user="default",
+    password="",
+    port=9000,
+    database="todo",
+)
 
 
 @dp.message_handler(commands="all")
 async def all_tasks(payload: types.Message):
-    await payload.reply(f"```{get_todo_data().to_markdown()}```", parse_mode="Markdown")
+    ch_all_data = connection.execute("SELECT * FROM todo.todo")
+
+    await payload.reply(
+        f"```{pd.DataFrame(ch_all_data, columns=['id', 'text', 'status']).drop('id', axis=1).to_markdown()}```",
+        parse_mode="Markdown"
+    )
 
 
 @dp.message_handler(commands="add")
 async def add_task(payload: types.Message):
     text = payload.get_args().strip()
-    new_task = pd.DataFrame({"text": [text], "status": ["active"]})
-    updated_tasks = pd.concat([get_todo_data(), new_task], ignore_index=True, axis=0)
 
-    # ============ Сохраняем ============
-    updated_tasks.to_csv(PATH_TO_TODO_TABLE, index=False)
-    # ===================================
+    connection.execute(
+        "INSERT INTO todo.todo (id, text, status) VALUES (generateUUIDv4(), %(text)s, 'active')",
+        {"text": text}
+    )
 
     logging.info(f"Добавил в таблицу задачу - {text}")
     await payload.reply(f"Добавил задачу: *{text}*", parse_mode="Markdown")
@@ -48,12 +54,11 @@ async def add_task(payload: types.Message):
 @dp.message_handler(commands="done")
 async def complete_task(payload: types.Message):
     text = payload.get_args().strip()
-    df = get_todo_data()
-    df.loc[df.text == text, "status"] = "complete"
 
-    # ============ Сохраняем ============
-    df.to_csv(PATH_TO_TODO_TABLE, index=False)
-    # ===================================
+    connection.execute(
+        "ALTER TABLE todo.todo UPDATE status = 'complete' WHERE text = %(text)s",
+        {"text": text}
+    )
 
     logging.info(f"Выполнил задачу - {text}")
     await payload.reply(f"Выполнено: *{text}*", parse_mode="Markdown")
